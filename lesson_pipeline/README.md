@@ -36,3 +36,11 @@
 ## 시험
 pip install pymupdf google-api-python-client google-auth
 python -m unittest discover -s lesson_pipeline/tests -v
+
+## 결과물 보관 규칙 (확정)
+- **ZIP/RAR/7z 압축 파일 생성 및 업로드 금지.** 압축본을 기본 결과물로 사용하지 않는다.
+- 교재 결과 폴더 안에 `Unit 01_문법 주제`처럼 Unit 번호와 학습 주제가 보이는 폴더를 생성한다.
+- 각 Unit 폴더에는 `원본.pdf`, `수업자료.pdf`, `TEACHER_CUE.pdf`, 필요한 `개념백지_영작.pdf`, `교사용정답.pdf`를 **개별 PDF**로 저장한다.
+- Unit 외 원본 페이지도 PDF로 보관하며 원본 전체 교재는 변경하지 않는다.
+- Notion 수업자료 DB에서 결과 링크는 ZIP이 아닌 **수업자료.pdf 직접 링크**로 설정한다. 본문에는 Cue·원본·백지·정답 각각의 직접 링크를 제공한다.
+- Drive에 파일별 저장 확인 후 Notion 관계형 연결/직접 링크를 검증해야 완료로 표시한다.
