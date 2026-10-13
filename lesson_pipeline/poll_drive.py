@@ -65,7 +65,10 @@ def folder(api, parent, name):
 
 
 def upload(api, path, parent):
-    mime = "application/pdf" if str(path).lower().endswith(".pdf") else "application/json"
+    suffix = Path(path).suffix.lower()
+    if suffix not in (".pdf", ".json"):
+        raise ValueError("Only uncompressed PDF/JSON outputs are allowed; ZIP archives are prohibited.")
+    mime = "application/pdf" if suffix == ".pdf" else "application/json"
     return api.files().create(
         body={"name": Path(path).name, "parents": [parent]},
         media_body=MediaFileUpload(str(path), mimetype=mime, resumable=True),
