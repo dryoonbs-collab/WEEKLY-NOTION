@@ -34,7 +34,7 @@ class TeacherCacheTests(unittest.TestCase):
         data, lesson, previous, query = fixtures()
         with patch.object(sync, 'query_db', side_effect=query): caches, lessons, daily = sync.build_cache(DAY)
         self.assertEqual((lessons,daily), (1,1))
-        body=caches[0]['data']; self.assertTrue(body['complete']);self.assertEqual(body['cache_version'],2)
+        body=caches[0]['data']; self.assertTrue(body['complete']);self.assertEqual(body['cache_version'],3)
         row=body['schedule'][0]
         self.assertEqual(row['last_edited_time'],V);self.assertEqual(row['lesson'],' Reading\n')
         self.assertEqual(row['books'],['Reader']);self.assertEqual(row['due'][0]['words'],'')
@@ -64,6 +64,21 @@ class TeacherCacheTests(unittest.TestCase):
         self.assertEqual(len(sync.due_for_lesson(lesson,[previous],DAY,{sync.norm_id(B):'Reader'})),1)
         previous['properties']['교재이름']=relation('other')
         self.assertEqual(sync.due_for_lesson(lesson,[previous],DAY,{}),[])
+    def test_vocab_is_class_wide_and_test_date_driven(self):
+        _, lesson, previous, _ = fixtures()
+        previous['properties'].update({'교재이름': relation('other'), '강사DB': relation('other-teacher'), '시간': select('8시 40'), '단어시험일': date(DAY)})
+        row = sync.due_for_lesson(lesson, [previous], DAY, {})[0]
+        self.assertEqual(row['words'], '20'); self.assertEqual(row['homework'], '')
+        self.assertEqual(row['matchNote'], '')
+        previous['properties']['반 DB'] = relation('other-class')
+        self.assertEqual(sync.due_for_lesson(lesson, [previous], DAY, {}), [])
+    def test_same_day_self_record_and_archived_vocab(self):
+        _, lesson, _, _ = fixtures()
+        lesson['properties']['단어시험일'] = date(DAY)
+        self.assertEqual(sync.due_for_lesson(lesson, [lesson], DAY, {})[0]['words'], '20')
+        self.assertEqual(sync.due_for_lesson(lesson, [lesson], '2026-10-03', {}), [])
+        lesson['archived'] = True
+        self.assertEqual(sync.due_for_lesson(lesson, [lesson], DAY, {}), [])
     def test_pagination_cycle_and_archived_rows(self):
         result={'results':[{'id':'old','archived':True},{'id':'live'}],'has_more':True,'next_cursor':'repeat'}
         with patch.object(sync,'notion_request',return_value=result):
@@ -74,3 +89,4 @@ class TeacherCacheTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):sync.rel({'type':'relation','relation':[],'has_more':True})
 
 if __name__ == '__main__':unittest.main()
+
