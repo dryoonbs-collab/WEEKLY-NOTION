@@ -220,29 +220,28 @@ def due_for_lesson(lesson, sources, day, book_names):
     classes, books = set(rel(p.get("반 DB"))), set(rel(p.get("교재이름")))
     result = []
     for source in sources:
-        if norm_id(source["id"]) == norm_id(lesson["id"]):
+        if source.get("archived") or source.get("in_trash"):
             continue
         q = source.get("properties", {})
         assigned = (date_start(q.get("출제일")) or "")[:10]
+        if norm_id(source["id"]) == norm_id(lesson["id"]) and assigned != day:
+            continue
         if not assigned or assigned > day or not classes.intersection(rel(q.get("반 DB"))):
             continue
         source_books = rel(q.get("교재이름"))
         book_match = bool(books and source_books)
-        if book_match:
-            if not books.intersection(source_books):
-                continue
-        elif (not select_name(p.get("시간"))
-              or select_name(p.get("시간")) != select_name(q.get("시간"))
-              or not set(rel(p.get("강사DB"))).intersection(rel(q.get("강사DB")))):
-            continue
-        homework = text(q.get("숙제+교재단어")) if (date_start(q.get("검사일")) or "")[:10] == day else ""
+        same_book = book_match and bool(books.intersection(source_books))
+        same_slot = bool(select_name(p.get("시간"))) and select_name(p.get("시간")) == select_name(q.get("시간")) and bool(set(rel(p.get("강사DB"))).intersection(rel(q.get("강사DB"))))
+        # Academy vocabulary belongs to the class and its test date, independent
+        # of the subject, teacher, or slot used to enter the assignment.
+        homework = text(q.get("숙제+교재단어")) if (date_start(q.get("검사일")) or "")[:10] == day and (same_book or (not book_match and same_slot)) else ""
         words = text(q.get("학원단어")) if (date_start(q.get("단어시험일")) or "")[:10] == day else ""
         if not homework.strip() and not words.strip():
             continue
         result.append({"id": source["id"], "assignedDate": assigned,
                        "books": [book_names.get(x) or "교재명 확인 필요" for x in source_books],
                        "homework": homework, "words": words,
-                       "matchNote": "" if book_match else "교재 미입력 · 같은 반·시간·담당 기준",
+                       "matchNote": "교재 미입력 · 같은 반·시간·담당 기준" if homework and not book_match else "",
                        "notionUrl": notion_url(source["id"])})
     return sorted(result, key=lambda r: (r["assignedDate"], r["id"]))
 
@@ -327,7 +326,7 @@ def build_cache(target_date):
     pages = staff + timetable + daily + classes + students + books + due_sources
     updated_at = max((page_version(p) for p in pages), default=datetime.now(KST).isoformat())
     caches = [{"teacher": teacher, "notion_updated_at": updated_at, "data": {
-        **data, "source_date": target_date, "source": "Notion", "cache_version": 2, "complete": True,
+        **data, "source_date": target_date, "source": "Notion", "cache_version": 3, "complete": True,
     }} for teacher, data in sorted(groups.items())]
     return caches, len(timetable), len(daily)
 
@@ -438,3 +437,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
