@@ -6,8 +6,8 @@
 
 5단계 루틴을 실제로 실행하는 스크립트입니다.
 
-  1. 시간표 조회        : 담당자가 준비한 대상 날짜의 시간표만 사용.
-                          시간표가 없으면 종료하며 전주 복사·수업 추가·담당 백필은 하지 않음.
+  1. 시간표 준비        : 당일 수업이 없으면 지난주 같은 요일의 수업을 복사.
+                          교재 및 교과서 관계를 복사하고, 둘 다 비어 있으면 로그에 표시.
                           반 없는 행은 제외하고, 반 있는 행의 시간·담당을 쓰기 전에 검증.
   2. 수업 배정 결정     : 오늘 시간표의 반/시간과 학생 DB2의 재원생 관계를 대조.
                           같은 학생·시간에 정상반과 임시반이 모두 있으면 임시반을 선택하고,
@@ -61,7 +61,7 @@ import os
 import sys
 import time
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
 from typing import Any, Optional
@@ -321,11 +321,13 @@ def title_lookup(page_id: str) -> str:
 # --------------------------------------------------------------------------
 
 def step1_generate_timetable(today: date) -> list[dict]:
-    """기존 호출 이름을 유지하되, 시간표를 읽기만 한다. 전주 복사는 금지한다."""
-    rows = query_database_all(
-        TIMETABLE_DB_ID,
-        filter_obj={"property": "출제일", "date": {"equals": today.isoformat()}},
-    )
+    def load(day: date) -> list[dict]:
+        return query_database_all(
+            TIMETABLE_DB_ID,
+            filter_obj={"property": "출제일", "date": {"equals": day.isoformat()}},
+        )
+
+    rows = load(today)
     usable = []
     for row in rows:
         if not get_relation_ids(row, BAN_PROP_TT):
@@ -335,8 +337,45 @@ def step1_generate_timetable(today: date) -> list[dict]:
         if len(get_relation_ids(row, "강사DB")) != 1:
             raise RuntimeError(f"시간표 담당은 정확히 한 명이어야 합니다: {row['id']}")
         usable.append(row)
-    log.info("STEP 1: %s 기존 시간표=%d, 수업 대상=%d (자동 복사 없음)",
-             today, len(rows), len(usable))
+
+    if usable:
+        log.info("STEP 1: %s 기존 시간표 %d건 사용", today, len(usable))
+        return usable
+
+    previous = today - timedelta(days=7)
+    pending = []
+    for row in load(previous):
+        title = get_title_text(row)
+        classes = get_relation_ids(row, BAN_PROP_TT)
+        if not classes or title.startswith("[확정표 외 제외]"):
+            continue
+        slot = get_select_name(row, "시간")
+        daily_slot(slot)
+        teachers = get_relation_ids(row, "강사DB")
+        if len(teachers) != 1:
+            raise RuntimeError(f"전주 시간표 담당은 정확히 한 명이어야 합니다: {row['id']}")
+        title = title.replace(previous.strftime("%Y.%m.%d"), today.strftime("%Y.%m.%d"), 1)
+        properties = {
+            "날짜 반이름 담당": {"title": [{"text": {"content": title}}]},
+            "출제일": {"date": {"start": today.isoformat()}},
+            "시간": {"select": {"name": slot}},
+            "요일": {"select": {"name": "월화수목금"[today.weekday()]}},
+            BAN_PROP_TT: {"relation": [{"id": value} for value in classes]},
+            "강사DB": {"relation": [{"id": teachers[0]}]},
+        }
+        has_material = False
+        for name in ("교재이름", "⭕ 교과서 DB 1"):
+            ids = get_relation_ids(row, name)
+            if ids:
+                properties[name] = {"relation": [{"id": value} for value in ids]}
+                has_material = True
+        if not has_material:
+            log.warning("전주 수업의 교재·교과서 관계가 비어 있음: %s", title)
+        pending.append(properties)
+
+    for properties in pending:
+        usable.append(create_page(TIMETABLE_DB_ID, properties))
+    log.info("STEP 1: %s 전주 기준 시간표 %d건", today, len(usable))
     return usable
 
 
