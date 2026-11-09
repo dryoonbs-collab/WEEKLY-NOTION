@@ -38,11 +38,11 @@ class GenerationTests(unittest.TestCase):
         self.globals.start()
         self.addCleanup(self.globals.stop)
 
-    def test_missing_timetable_never_queries_last_week_or_writes(self):
+    def test_missing_timetable_checks_last_week_without_writing_if_empty(self):
         with patch.object(g, "query_database_all", return_value=[]) as query, \
                 patch.object(g, "create_page") as create, patch.object(g, "update_page") as update:
             self.assertEqual(g.step1_generate_timetable(TODAY), [])
-        query.assert_called_once()
+        self.assertEqual(query.call_count, 2)
         create.assert_not_called()
         update.assert_not_called()
 
