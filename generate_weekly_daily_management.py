@@ -7,7 +7,7 @@
 5단계 루틴을 실제로 실행하는 스크립트입니다.
 
   1. 시간표 준비        : 당일 수업이 없으면 지난주 같은 요일의 수업을 복사.
-                          교재 및 교과서 관계를 복사하고, 둘 다 비어 있으면 로그에 표시.
+                          같은 반·교시의 최신 수업에서 교재 및 교과서 관계를 가져옴.
                           반 없는 행은 제외하고, 반 있는 행의 시간·담당을 쓰기 전에 검증.
   2. 수업 배정 결정     : 오늘 시간표의 반/시간과 학생 DB2의 재원생 관계를 대조.
                           같은 학생·시간에 정상반과 임시반이 모두 있으면 임시반을 선택하고,
@@ -338,13 +338,34 @@ def step1_generate_timetable(today: date) -> list[dict]:
             raise RuntimeError(f"시간표 담당은 정확히 한 명이어야 합니다: {row['id']}")
         usable.append(row)
 
-    if usable:
-        log.info("STEP 1: %s 기존 시간표 %d건 사용", today, len(usable))
-        return usable
-
     previous = today - timedelta(days=7)
+    material_fields = ("교재이름", "⭕ 교과서 DB 1")
+    templates = [row for row in usable if not any(get_relation_ids(row, name) for name in material_fields)] if usable else load(previous)
+    class_ids = sorted({value for row in templates for value in get_relation_ids(row, BAN_PROP_TT)})
+    history = []
+    for offset in range(0, len(class_ids), 50):
+        history.extend(query_database_all(TIMETABLE_DB_ID, filter_obj={"and": [
+            {"property": "출제일", "date": {"before": today.isoformat()}},
+            {"or": [{"property": BAN_PROP_TT, "relation": {"contains": value}}
+                    for value in class_ids[offset:offset + 50]]},
+            {"or": [{"property": name, "relation": {"is_not_empty": True}}
+                    for name in material_fields]},
+        ]}))
+    settings = {}
+    for row in history:
+        if get_title_text(row).startswith("[확정표 외 제외]"):
+            continue
+        slot = get_select_name(row, "시간")
+        if slot not in TIME_MAP:
+            continue
+        classes = frozenset(map(_normalize_id, get_relation_ids(row, BAN_PROP_TT)))
+        day = get_date_start(row, "출제일") or ""
+        if not day:
+            continue
+        settings.setdefault((classes, daily_slot(slot)), []).append((day, row))
+
     pending = []
-    for row in load(previous):
+    for row in templates:
         title = get_title_text(row)
         classes = get_relation_ids(row, BAN_PROP_TT)
         if not classes or title.startswith("[확정표 외 제외]"):
@@ -363,19 +384,34 @@ def step1_generate_timetable(today: date) -> list[dict]:
             BAN_PROP_TT: {"relation": [{"id": value} for value in classes]},
             "강사DB": {"relation": [{"id": teachers[0]}]},
         }
-        has_material = False
-        for name in ("교재이름", "⭕ 교과서 DB 1"):
-            ids = get_relation_ids(row, name)
-            if ids:
-                properties[name] = {"relation": [{"id": value} for value in ids]}
-                has_material = True
-        if not has_material:
-            log.warning("전주 수업의 교재·교과서 관계가 비어 있음: %s", title)
-        pending.append(properties)
+        key = (frozenset(map(_normalize_id, classes)), daily_slot(slot))
+        candidates = settings.get(key, [])
+        if candidates:
+            latest_day = max(day for day, _ in candidates)
+            latest = [source for day, source in candidates if day == latest_day]
+            matching_teacher = [source for source in latest
+                                if set(map(_normalize_id, get_relation_ids(source, "강사DB")))
+                                == set(map(_normalize_id, teachers))]
+            sources = matching_teacher or latest
+            for name in material_fields:
+                options = {tuple(sorted(map(_normalize_id, get_relation_ids(source, name))))
+                           for source in sources}
+                if len(options) == 1 and (ids := next(iter(options))):
+                    properties[name] = {"relation": [{"id": value} for value in ids]}
+                elif len(options) > 1:
+                    log.warning("최신 수업의 %s 설정이 서로 달라 연결 보류: %s", name, title)
+        if "교재이름" not in properties and "⭕ 교과서 DB 1" not in properties:
+            log.warning("같은 수업의 교재·교과서 설정 없음: %s", title)
+        if usable:
+            material_patch = {name: properties[name] for name in material_fields if name in properties}
+            if material_patch:
+                patch_row(row, material_patch)
+        else:
+            pending.append(properties)
 
     for properties in pending:
         usable.append(create_page(TIMETABLE_DB_ID, properties))
-    log.info("STEP 1: %s 전주 기준 시간표 %d건", today, len(usable))
+    log.info("STEP 1: %s 사용할 시간표 %d건", today, len(usable))
     return usable
 
 
@@ -639,7 +675,7 @@ def step4_link_exam_days(today: date, daily_rows: list[dict], timetable_rows: Op
             slot = get_select_name(row, "수업시간")
             by_class_slot.setdefault((_normalize_id(ban_id), slot), []).append(row)
 
-    for date_prop in ("검사일", "단어시험일"):
+    for date_prop, content_prop in (("검사일", "숙제+교재단어"), ("단어시험일", "학원단어")):
         matches = query_database_all(
             TIMETABLE_DB_ID, filter_obj={"property": date_prop, "date": {"equals": today.isoformat()}},
         )
@@ -649,6 +685,9 @@ def step4_link_exam_days(today: date, daily_rows: list[dict], timetable_rows: Op
             if get_date_start(tt, date_prop) == today.isoformat():
                 unique_matches[_normalize_id(tt["id"])] = tt
         for tt in unique_matches.values():
+            if not get_rich_text(tt, content_prop).strip():
+                continue
+            source_students = set(map(_normalize_id, get_relation_ids(tt, STUDENT_PROP_TT or "학생  DB1")))
             daily_time = daily_slot(get_select_name(tt, "시간"))
             targets = {}
             for ban_id in get_relation_ids(tt, BAN_PROP_TT):
@@ -660,6 +699,9 @@ def step4_link_exam_days(today: date, daily_rows: list[dict], timetable_rows: Op
             tt_teachers = {_normalize_id(i) for i in get_relation_ids(tt, "강사DB")}
             linked = 0
             for row in targets.values():
+                students = set(map(_normalize_id, get_relation_ids(row, "학생")))
+                if source_students and not students.intersection(source_students):
+                    continue
                 teachers = {_normalize_id(i) for i in get_relation_ids(row, "담당")}
                 if teachers and tt_teachers and not teachers.intersection(tt_teachers):
                     log.warning("담당 불일치로 연결 보류: daily=%s timetable=%s", row["id"], tt["id"])
