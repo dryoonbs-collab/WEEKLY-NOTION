@@ -20,6 +20,8 @@ def row(pid, **props):
 def timetable(pid="tt1", teacher="teacher1", slot="7시 20", class_id="class1"):
     return row(pid, 반=rel(class_id), 시간={"select": {"name": slot}},
                강사DB=rel(teacher), 요일={"select": {"name": "화"}},
+               **{"숙제+교재단어": {"rich_text": [{"plain_text": "숙제"}]},
+                  "학원단어": {"rich_text": [{"plain_text": "학원단어 범위"}]}},
                검사일={"date": {"start": TODAY.isoformat()}},
                단어시험일={"date": {"start": TODAY.isoformat()}})
 
@@ -46,11 +48,31 @@ class GenerationTests(unittest.TestCase):
         create.assert_not_called()
         update.assert_not_called()
 
+    def test_new_timetable_uses_latest_matching_lesson_materials(self):
+        template = timetable("template")
+        older, latest, unrelated = timetable("older"), timetable("latest"), timetable("unrelated", slot="8시 40")
+        for source, day, book in [(older, "2026-08-25", "old"),
+                                  (latest, "2026-09-04", "new"),
+                                  (unrelated, "2026-09-07", "other")]:
+            source["properties"].update({"출제일": {"date": {"start": day}}, "교재이름": rel(book)})
+        with patch.object(g, "query_database_all", side_effect=[[], [template], [older, latest, unrelated]]):
+            result = g.step1_generate_timetable(TODAY)
+        self.assertEqual(g.get_relation_ids(result[0], "교재이름"), ["new"])
+        self.assertEqual(g.get_rich_text(result[0], "숙제+교재단어"), "")
+
+    def test_due_homework_does_not_supply_missing_academy_word_range(self):
+        source, target = timetable(), daily()
+        source["properties"].pop("학원단어")
+        with patch.object(g, "query_database_all", return_value=[source]):
+            g.step4_link_exam_days(TODAY, [target])
+        self.assertEqual(g.get_relation_ids(target, "검사일"), ["tt1"])
+        self.assertEqual(g.get_relation_ids(target, "단어시험일"), [])
+
     def test_no_class_rows_are_excluded_without_modification(self):
         empty = timetable("empty")
         empty["properties"]["반"] = rel()
         valid = timetable()
-        with patch.object(g, "query_database_all", return_value=[empty, valid]), \
+        with patch.object(g, "query_database_all", side_effect=[[empty, valid], []]), \
                 patch.object(g, "update_page") as update:
             self.assertEqual(g.step1_generate_timetable(TODAY), [valid])
         update.assert_not_called()
@@ -59,7 +81,7 @@ class GenerationTests(unittest.TestCase):
         existing = timetable()
         existing["properties"]["요일"] = {"select": None}
         existing["properties"]["숙제+교재단어"] = {"rich_text": [{"text": {"content": "current homework"}}]}
-        with patch.object(g, "query_database_all", side_effect=[[existing]]), patch.object(g, "update_page"):
+        with patch.object(g, "query_database_all", side_effect=[[existing], []]), patch.object(g, "update_page"):
             result = g.step1_generate_timetable(TODAY)
         self.assertIsNone(g.get_select_name(result[0], "요일"))
         self.assertEqual(g.get_rich_text(result[0], "숙제+교재단어"), "current homework")
