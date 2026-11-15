@@ -8,16 +8,14 @@
 
   1. 시간표 준비        : 당일 수업이 없으면 지난주 같은 요일의 수업을 복사.
                           같은 반·교시의 최신 수업에서 교재 및 교과서 관계를 가져옴.
-                          반 없는 행은 제외하고, 반 있는 행의 시간·담당을 쓰기 전에 검증.
+                          반 없는 수업은 개별지도로 표시하고 시간·담당을 검증.
   2. 수업 배정 결정     : 오늘 시간표의 반/시간과 학생 DB2의 재원생 관계를 대조.
                           같은 학생·시간에 정상반과 임시반이 모두 있으면 임시반을 선택하고,
                           임시반끼리 충돌하면 임의 선택하지 않고 해당 학생을 보류.
   3. 시간표 학생 연결   : 결정된 학생을 시간표의 학생 DB1 관계에 먼저 반영.
   4. 매일관리 생성/교정 : (날짜, 학생, 시간) 기준으로 기존 행을 먼저 찾고,
                           있으면 시간표 기준 관계를 교정하며 없을 때만 새로 생성.
-  5. 검사일/시험일 연결 : 시간표 전체에서 검사일/단어시험일이 "오늘"인 행을 찾아,
-                          같은 반·시간대의 매일관리 행(4단계에서 이미 생성된 것)에
-                          '검사일'/'단어시험일' 관계만 추가. 새 매일관리 행은 만들지 않음.
+  숙제·단어 조회는 사이트에서 처리하며 매일관리의 검사일/시험일 관계는 수정하지 않음.
 
 실행 전 필수 준비
 ------------------
@@ -330,12 +328,14 @@ def step1_generate_timetable(today: date) -> list[dict]:
     rows = load(today)
     usable = []
     for row in rows:
-        if not get_relation_ids(row, BAN_PROP_TT):
-            log.warning("반 없는 시간표 제외: %s", row["id"])
-            continue
         daily_slot(get_select_name(row, "시간"))
         if len(get_relation_ids(row, "강사DB")) != 1:
             raise RuntimeError(f"시간표 담당은 정확히 한 명이어야 합니다: {row['id']}")
+        if not get_relation_ids(row, BAN_PROP_TT):
+            teacher = title_lookup(get_relation_ids(row, "강사DB")[0])
+            title = f"{today.strftime('%Y.%m.%d')} | 개별지도 | {teacher}"
+            if get_title_text(row) != title:
+                patch_row(row, {"날짜 반이름 담당": {"title": [{"text": {"content": title}}]}})
         usable.append(row)
 
     previous = today - timedelta(days=7)
@@ -486,17 +486,27 @@ def choose_preferred_assignment(candidates: list[dict]) -> tuple[Optional[dict],
     """
     if not candidates:
         return None, "후보 없음"
-    temporary = [item for item in candidates if item["is_temporary"]]
-    pool = temporary or candidates
-    class_ids = {_normalize_id(item["class_id"]) for item in pool}
-    if len(class_ids) != 1:
-        kind = "임시반" if temporary else "정상반"
-        names = sorted({item["class_title"] for item in pool})
-        return None, f"같은 시간에 {kind}이 여러 개 연결됨: {names}"
-    timetable_ids = {_normalize_id(item["timetable"]["id"]) for item in pool}
-    if len(timetable_ids) != 1:
-        return None, f"같은 반·시간의 시간표가 여러 개임: {sorted(timetable_ids)}"
-    return pool[0], None
+    # Merge memberships within one lesson before applying cross-lesson priority.
+    lessons = {}
+    for item in candidates:
+        key = (_normalize_id(item["timetable"]["id"]), item["slot"],
+               tuple(sorted(map(_normalize_id, item["teacher_ids"]))))
+        if key not in lessons:
+            lessons[key] = {**item, "class_ids": [], "class_titles": []}
+        lesson = lessons[key]
+        if item["class_id"] and _normalize_id(item["class_id"]) not in {
+                _normalize_id(i) for i in lesson["class_ids"]}:
+            lesson["class_ids"].append(item["class_id"])
+            lesson["class_titles"].append(item["class_title"])
+        lesson["is_temporary"] |= item["is_temporary"]
+    pool = list(lessons.values())
+    temporary = [item for item in pool if item["is_temporary"]]
+    pool = temporary or pool
+    if len(pool) != 1:
+        return None, "같은 시간에 서로 다른 시간표가 여러 개 연결됨"
+    chosen = pool[0]
+    chosen["class_title"] = " + ".join(chosen["class_titles"]) or "개별지도"
+    return chosen, None
 
 
 def build_preferred_assignments(timetable_rows: list[dict]) -> tuple[dict, dict, list[dict]]:
@@ -517,7 +527,25 @@ def build_preferred_assignments(timetable_rows: list[dict]) -> tuple[dict, dict,
         if not teacher_ids:
             log.warning("강사 없는 시간표는 학생 배정에서 보류: %s", tt["id"])
             continue
-        for class_id in get_relation_ids(tt, BAN_PROP_TT):
+        class_ids = get_relation_ids(tt, BAN_PROP_TT)
+        if not class_ids:
+            direct_ids = get_relation_ids(tt, STUDENT_PROP_TT) if STUDENT_PROP_TT else []
+            if not direct_ids:
+                log.warning("개별지도 학생 연결 없음: %s", tt["id"])
+            for student_id in dict.fromkeys(direct_ids):
+                student = get_page(student_id)
+                status = student.get("properties", {}).get("상태", {})
+                if (status.get(STUDENT_STATUS_TYPE) or {}).get("name") != "재원":
+                    continue
+                key = (_normalize_id(student_id), slot)
+                candidates_by_student_slot.setdefault(key, []).append({
+                    "student": student, "student_id": student_id, "slot": slot,
+                    "class_id": "", "class_title": "개별지도", "is_temporary": False,
+                    "timetable": tt, "teacher_ids": teacher_ids,
+                    "teacher_title": ", ".join(cached_title(i) for i in teacher_ids),
+                    "weekday": get_select_name(tt, "요일"),
+                })
+        for class_id in class_ids:
             normalized_class_id = _normalize_id(class_id)
             class_title = cached_title(class_id)
             if normalized_class_id not in class_cache:
@@ -614,7 +642,7 @@ def step2_3_generate_daily(today: date, timetable_rows: list[dict]) -> list[dict
         tt = assignment["timetable"]
         student = assignment["student"]
         student_id = assignment["student_id"]
-        class_id = assignment["class_id"]
+        class_ids = assignment["class_ids"]
         class_title = assignment["class_title"]
         teacher_ids = assignment["teacher_ids"]
         weekday = assignment["weekday"]
@@ -624,14 +652,16 @@ def step2_3_generate_daily(today: date, timetable_rows: list[dict]) -> list[dict
         existing = by_student_slot.get(key)
         if existing is not None:
             patch: dict[str, Any] = {}
-            if {_normalize_id(i) for i in get_relation_ids(existing, BAN_PROP_DAILY)} != {_normalize_id(class_id)}:
-                patch[BAN_PROP_DAILY] = {"relation": [{"id": class_id}]}
+            if {_normalize_id(i) for i in get_relation_ids(existing, BAN_PROP_DAILY)} != {_normalize_id(i) for i in class_ids}:
+                patch[BAN_PROP_DAILY] = {"relation": [{"id": i} for i in class_ids]}
             if {_normalize_id(i) for i in get_relation_ids(existing, "출제 시간표")} != {_normalize_id(tt["id"])}:
                 patch["출제 시간표"] = {"relation": [{"id": tt["id"]}]}
             if {_normalize_id(i) for i in get_relation_ids(existing, "담당")} != {_normalize_id(i) for i in teacher_ids}:
                 patch["담당"] = {"relation": [{"id": i} for i in teacher_ids]}
             if weekday and get_select_name(existing, "요일") != weekday:
                 patch["요일"] = {"select": {"name": weekday}}
+            if get_title_text(existing) != row_title:
+                patch["이름"] = {"title": [{"text": {"content": row_title}}]}
             if patch:
                 patch["이름"] = {"title": [{"text": {"content": row_title}}]}
                 patch_row(existing, patch)
@@ -642,7 +672,7 @@ def step2_3_generate_daily(today: date, timetable_rows: list[dict]) -> list[dict
             "이름": {"title": [{"text": {"content": row_title}}]},
             "날짜": {"date": {"start": today.isoformat()}},
             "학생": {"relation": [{"id": student_id}]},
-            BAN_PROP_DAILY: {"relation": [{"id": class_id}]},
+            BAN_PROP_DAILY: {"relation": [{"id": i} for i in class_ids]},
             "수업시간": {"select": {"name": slot}},
             "출제 시간표": {"relation": [{"id": tt["id"]}]},
             "담당": {"relation": [{"id": i} for i in teacher_ids]},
@@ -735,7 +765,6 @@ def main():
         log.warning("대상 날짜의 수업 시간표가 없어 매일관리를 생성하지 않습니다.")
         return
     daily_rows = step2_3_generate_daily(today, timetable_rows)
-    step4_link_exam_days(today, daily_rows, timetable_rows)
 
     log.info("=== 실행 완료 ===")
 

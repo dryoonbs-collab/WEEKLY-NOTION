@@ -68,14 +68,26 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(g.get_relation_ids(target, "검사일"), ["tt1"])
         self.assertEqual(g.get_relation_ids(target, "단어시험일"), [])
 
-    def test_no_class_rows_are_excluded_without_modification(self):
+    def test_no_class_is_named_individual_and_uses_direct_students(self):
         empty = timetable("empty")
         empty["properties"]["반"] = rel()
-        valid = timetable()
-        with patch.object(g, "query_database_all", side_effect=[[empty, valid], []]), \
-                patch.object(g, "update_page") as update:
-            self.assertEqual(g.step1_generate_timetable(TODAY), [valid])
-        update.assert_not_called()
+        empty["properties"]["수강생"] = rel("student1")
+        student = row("student1", 이름={"title": [{"text": {"content": "Test"}}]},
+                      상태={"select": {"name": "재원"}})
+        with patch.object(g, "query_database_all", side_effect=[[empty], []]), \
+                patch.object(g, "title_lookup", return_value="Teacher"), \
+                patch.object(g, "update_page"):
+            self.assertEqual(g.step1_generate_timetable(TODAY), [empty])
+        self.assertIn("개별지도", g.get_title_text(empty))
+        with patch.object(g, "query_database_all", return_value=[]), \
+                patch.object(g, "STUDENT_PROP_TT", "수강생"), \
+                patch.object(g, "get_page", return_value=student), \
+                patch.object(g, "title_lookup", return_value="Teacher"), \
+                patch.object(g, "update_page"):
+            rows = g.step2_3_generate_daily(TODAY, [empty])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(g.get_relation_ids(rows[0], "반"), [])
+        self.assertIn("개별지도", g.get_title_text(rows[0]))
 
     def test_existing_timetable_preserves_blank_weekday_and_lesson(self):
         existing = timetable()
@@ -151,7 +163,15 @@ class GenerationTests(unittest.TestCase):
         for tt in slots:
             self.assertEqual(g.get_relation_ids(tt, "수강생"), ["student1"])
 
-    def test_temporary_class_wins_before_timetable_roster_and_daily_creation(self):
+    def test_main_never_links_due_relations(self):
+        with patch.object(g, "resolve_all_property_names"), \
+                patch.object(g, "step1_generate_timetable", return_value=[timetable()]), \
+                patch.object(g, "step2_3_generate_daily", return_value=[]), \
+                patch.object(g, "step4_link_exam_days") as link:
+            g.main()
+        link.assert_not_called()
+
+    def test_combined_lesson_keeps_both_memberships_and_one_daily(self):
         student = row("student1", 이름={"title": [{"text": {"content": "장민준"}}]})
         mixed = timetable("mixed-tt", class_id="normal-class")
         mixed["properties"]["반"] = rel("normal-class", "temp-class")
@@ -175,7 +195,7 @@ class GenerationTests(unittest.TestCase):
 
         self.assertEqual(g.get_relation_ids(mixed, "학생 DB1"), ["student1"])
         self.assertEqual(len(rows), 1)
-        self.assertEqual(g.get_relation_ids(rows[0], "반"), ["temp-class"])
+        self.assertEqual(g.get_relation_ids(rows[0], "반"), ["normal-class", "temp-class"])
         self.assertEqual(g.get_relation_ids(rows[0], "출제 시간표"), ["mixed-tt"])
 
     def test_existing_normal_daily_is_corrected_to_temporary_without_new_row(self):

@@ -34,7 +34,7 @@ class TeacherCacheTests(unittest.TestCase):
         data, lesson, previous, query = fixtures()
         with patch.object(sync, 'query_db', side_effect=query): caches, lessons, daily = sync.build_cache(DAY)
         self.assertEqual((lessons,daily), (1,1))
-        body=caches[0]['data']; self.assertTrue(body['complete']);self.assertEqual(body['cache_version'],3)
+        body=caches[0]['data']; self.assertTrue(body['complete']);self.assertEqual(body['cache_version'],4)
         row=body['schedule'][0]
         self.assertEqual(row['last_edited_time'],V);self.assertEqual(row['lesson'],' Reading\n')
         self.assertEqual(row['books'],['Reader']);self.assertEqual(row['due'][0]['words'],'')
@@ -43,8 +43,8 @@ class TeacherCacheTests(unittest.TestCase):
         self.assertEqual(r['student_name'],'Example');self.assertEqual(r['class_name'],'11')
         self.assertEqual(r['teacher_id'],T);self.assertTrue(r['linked'])
         self.assertEqual(r['academy_vocab_wrong'],0);self.assertIsNone(r['textbook_vocab_wrong'])
-        self.assertEqual(r['homework_text'],'old WB');self.assertEqual(r['assignment'],' WB\n')
-        self.assertEqual(r['test_range'],'19');self.assertEqual(r['last_edited_time'],V)
+        self.assertEqual(r['homework_text'],' WB\n');self.assertEqual(r['assignment'],' WB\n')
+        self.assertEqual(r['test_range'],'');self.assertEqual(r['last_edited_time'],V)
     def test_empty_days_include_all_teachers(self):
         data, _, _, _ = fixtures();data[sync.DAILY_DB_ID]=[]
         with patch.object(sync,'query_db',side_effect=lambda source, f=None: [] if source==sync.TIMETABLE_DB_ID else data[source]):
@@ -59,11 +59,16 @@ class TeacherCacheTests(unittest.TestCase):
         data, lesson, _, query=fixtures();lesson['properties']['강사DB']=relation('unknown')
         with patch.object(sync,'query_db',side_effect=query):
             with self.assertRaisesRegex(RuntimeError,'teacher relation'):sync.build_cache(DAY)
-    def test_due_respects_books_and_teacher_change(self):
-        _, lesson, previous, _=fixtures();previous['properties']['강사DB']=relation('new')
-        self.assertEqual(len(sync.due_for_lesson(lesson,[previous],DAY,{sync.norm_id(B):'Reader'})),1)
-        previous['properties']['교재이름']=relation('other')
-        self.assertEqual(sync.due_for_lesson(lesson,[previous],DAY,{}),[])
+    def test_homework_requires_teacher_and_class_but_not_book_or_slot(self):
+        _, lesson, previous, _ = fixtures()
+        previous['properties']['강사DB'] = relation('new')
+        self.assertEqual(sync.due_for_lesson(lesson, [previous], DAY, {}), [])
+        previous['properties']['강사DB'] = lesson['properties']['강사DB']
+        previous['properties']['교재이름'] = relation('other')
+        previous['properties']['시간'] = select('8시 40')
+        self.assertEqual(sync.due_for_lesson(lesson, [previous], DAY, {})[0]['homework'], ' WB\n')
+        previous['properties']['검사일'] = date('2026-10-03')
+        self.assertEqual(sync.due_for_lesson(lesson, [previous], DAY, {}), [])
     def test_vocab_is_class_wide_and_test_date_driven(self):
         _, lesson, previous, _ = fixtures()
         previous['properties'].update({'교재이름': relation('other'), '강사DB': relation('other-teacher'), '시간': select('8시 40'), '단어시험일': date(DAY)})
